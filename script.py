@@ -121,7 +121,8 @@ def run_diamond(input_dir, tmp_dir, threads):
     cmd = [
         'diamond', 'makedb',
         '--in', concatenated_fasta,
-        '--db', diamond_db
+        '--db', diamond_db,
+        '--ignore-warnings'
     ]
     subprocess.run(cmd, check=True)
 
