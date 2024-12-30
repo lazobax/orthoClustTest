@@ -21,13 +21,30 @@ def setup_logging(log_file):
     logging.info('Script started.')
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description='Protein clustering script using MMseqs2 and MCL.')
+    parser = argparse.ArgumentParser(description='Protein clustering script using MMseqs2 and MCL (optionally DIAMOND).')
     parser.add_argument('input_directory', help='Directory containing FASTA proteome files.')
     parser.add_argument('prefix', help='Prefix for output files and directory.')
+
+    # Threads
+    parser.add_argument(
+        '--threads',
+        type=int,
+        default=1,
+        help='Number of CPU threads to use for the aligner. Default is 1.'
+    )
+
+    # Aligner choice: 'm' = MMseqs2, 'd' = DIAMOND
+    parser.add_argument(
+        '--aligner', '-a',
+        choices=['m', 'd'],
+        default='m',
+        help='Choose the aligner: mmseqs2 (m) or DIAMOND (d). Default is mmseqs2.'
+    )
+
     return parser.parse_args()
 
-def run_mmseqs2(input_dir, tmp_dir):
-    logging.info('Starting MMseqs2 all-vs-all search.')
+def run_mmseqs2(input_dir, tmp_dir, threads):
+    logging.info('Running MMseqs2 all-vs-all search.')
     db_dir = os.path.join(tmp_dir, 'db')
     result_dir = os.path.join(tmp_dir, 'result')
 
@@ -43,7 +60,11 @@ def run_mmseqs2(input_dir, tmp_dir):
                     shutil.copyfileobj(infile, outfile)
 
     # Create MMseqs2 database
-    cmd = ['mmseqs', 'createdb', concatenated_fasta, os.path.join(db_dir, 'proteins')]
+    cmd = [
+        'mmseqs', 'createdb',
+        concatenated_fasta,
+        os.path.join(db_dir, 'proteins')
+    ]
     subprocess.run(cmd, check=True)
 
     # Run MMseqs2 all-vs-all search
@@ -54,12 +75,13 @@ def run_mmseqs2(input_dir, tmp_dir):
         os.path.join(db_dir, 'proteins'),
         search_result,
         tmp_dir,
-        '-a',  # Include alignment
-        '--max-seqs', '1000'
+        '-a',                  # Include alignment
+        '--max-seqs', '1000',
+        '-t', str(threads)     # Number of threads
     ]
     subprocess.run(cmd, check=True)
 
-    # Convert results to TSV format
+    # Convert results to TSV (m8) format
     m8_result = os.path.join(result_dir, 'result.m8')
     cmd = [
         'mmseqs', 'convertalis',
@@ -67,15 +89,55 @@ def run_mmseqs2(input_dir, tmp_dir):
         os.path.join(db_dir, 'proteins'),
         search_result,
         m8_result,
-        '--format-output', 'query,target,pident'
+        '--format-output', 'query,target,pident',
+        '-t', str(threads)
     ]
     subprocess.run(cmd, check=True)
 
     logging.info('MMseqs2 search completed.')
     return m8_result
 
+def run_diamond(input_dir, tmp_dir, threads):
+    logging.info('Running DIAMOND all-vs-all search.')
+    result_dir = os.path.join(tmp_dir, 'result')
+    os.makedirs(result_dir, exist_ok=True)
+
+    # Concatenate all FASTA files
+    concatenated_fasta = os.path.join(tmp_dir, 'all_proteins.fasta')
+    with open(concatenated_fasta, 'w') as outfile:
+        for filename in os.listdir(input_dir):
+            if filename.endswith('.fasta') or filename.endswith('.fa'):
+                with open(os.path.join(input_dir, filename), 'r') as infile:
+                    shutil.copyfileobj(infile, outfile)
+
+    # Make DIAMOND DB
+    diamond_db = os.path.join(tmp_dir, 'diamond_db')
+    cmd = [
+        'diamond', 'makedb',
+        '--in', concatenated_fasta,
+        '--db', diamond_db
+    ]
+    subprocess.run(cmd, check=True)
+
+    # Run DIAMOND all-vs-all
+    # Note: We'll use the same file for both query and DB
+    m8_result = os.path.join(result_dir, 'result.m8')
+    cmd = [
+        'diamond', 'blastp',
+        '--db', diamond_db,
+        '--query', concatenated_fasta,
+        '--out', m8_result,
+        '--outfmt', '6 qseqid sseqid pident',  # Format 6, minimal columns
+        '--threads', str(threads),
+        '--evalue', '1e-5'
+    ]
+    subprocess.run(cmd, check=True)
+
+    logging.info('DIAMOND search completed.')
+    return m8_result
+
 def build_graph(m8_file):
-    logging.info('Building graph from MMseqs2 results.')
+    logging.info('Building graph from alignment results.')
     edges = []
     nodes = set()
     with open(m8_file, 'r') as infile:
@@ -114,13 +176,11 @@ def parse_fasta_headers(input_dir):
                         # Typical format: >db|protein_id|something_else ...
                         parts = header.split('|')
                         if len(parts) >= 3:
-                            # Use second and third fields
                             short_id = parts[1] + '|' + parts[2]
                             # Also store the original protein_id key (the full first token after '>')
                             full_id = header.split()[0][1:]
                             headers[full_id] = short_id
                         else:
-                            # Fallback if not enough fields
                             full_id = header.split()[0][1:]
                             headers[full_id] = full_id
     return headers
@@ -128,6 +188,7 @@ def parse_fasta_headers(input_dir):
 def get_top_words(cluster_headers, stopwords):
     words = []
     for header in cluster_headers:
+        # skip the '>' and parse annotation
         annotation = ' '.join(header.split()[1:])
         words.extend(annotation.split())
     words = [word for word in words if word.lower() not in stopwords]
@@ -161,7 +222,7 @@ def generate_csv(clusters, headers, input_dir, output_dir, prefix):
          open(cluster_names_file, 'w') as names_outfile, \
          open(pairs_file, 'w') as pairs_outfile:
 
-        # Write headers
+        # Write CSV headers
         header_line = 'Orthogroup,' + ','.join(files) + '\n'
         main_outfile.write(header_line)
         unassigned_outfile.write(header_line)
@@ -170,7 +231,8 @@ def generate_csv(clusters, headers, input_dir, output_dir, prefix):
 
         for cluster in clusters:
             cluster_proteins = cluster
-            
+
+            # Retrieve the short headers
             cluster_headers = [headers.get(protein_id, '') for protein_id in cluster_proteins]
 
             # Determine which files the proteins come from
@@ -180,7 +242,6 @@ def generate_csv(clusters, headers, input_dir, output_dir, prefix):
                 for f in files:
                     if protein_id in file_proteins[f]:
                         species_present.add(f)
-                        # Use the shortened ID in the final CSV
                         short_id = headers.get(protein_id, protein_id)
                         proteins_in_species[f].append(short_id)
 
@@ -194,20 +255,19 @@ def generate_csv(clusters, headers, input_dir, output_dir, prefix):
             # Write to cluster names file
             names_outfile.write(f'{orthogroup_name}: {top_words}\n')
 
-            # Prepare row for CSV
+            # Build CSV row
             row = [orthogroup_name]
             for f in files:
                 proteins_list = proteins_in_species[f]
                 row.append(';'.join(proteins_list))
 
-            # Write to appropriate CSV
+            # Decide if it is assigned or unassigned
             if len(species_present) > 1:
                 main_outfile.write(','.join(row) + '\n')
             else:
                 unassigned_outfile.write(','.join(row) + '\n')
 
-            # Write all pairwise combinations from this cluster to the pairs file
-            # Using the shortened IDs
+            # Write all pairwise combos to the pairs file
             short_cluster_proteins = [headers.get(pid, pid) for pid in cluster_proteins]
             for p1, p2 in combinations(short_cluster_proteins, 2):
                 pairs_outfile.write(f'{p1}\t{p2}\n')
@@ -218,24 +278,40 @@ def main():
     output_dir = args.prefix
     os.makedirs(output_dir, exist_ok=True)
 
-    # Setup logging with start time
+    # Setup logging
     log_file = os.path.join(output_dir, f'{args.prefix}_protein_clustering.log')
     setup_logging(log_file)
 
     tmp_dir = tempfile.mkdtemp()
     try:
-        m8_file = run_mmseqs2(args.input_directory, tmp_dir)
+        # Decide which aligner to use
+        if args.aligner == 'm':
+            m8_file = run_mmseqs2(args.input_directory, tmp_dir, args.threads)
+        else:  # args.aligner == 'd'
+            m8_file = run_diamond(args.input_directory, tmp_dir, args.threads)
+
+        # Build graph
         nodes, edges = build_graph(m8_file)
+
+        # Write MCL input
         mcl_input_file = os.path.join(tmp_dir, 'mcl_input.txt')
         write_mcl_input(edges, mcl_input_file)
+
+        # Run MCL
         mcl_output_file = os.path.join(tmp_dir, 'mcl_output.txt')
         run_mcl(mcl_input_file, mcl_output_file)
+
+        # Parse headers
         headers = parse_fasta_headers(args.input_directory)
+
+        # Read clusters from MCL output
         with open(mcl_output_file, 'r') as infile:
             clusters = [line.strip().split('\t') for line in infile]
+
+        # Generate CSV files
         generate_csv(clusters, headers, args.input_directory, output_dir, args.prefix)
+
         logging.info('Script completed successfully.')
-        # Log end time
         logging.info('Script ended.')
     except Exception as e:
         logging.error('An error occurred:', exc_info=True)
