@@ -133,7 +133,7 @@ def run_diamond(input_dir, tmp_dir, threads):
         '--db', diamond_db,
         '--query', concatenated_fasta,
         '--out', m8_result,
-        '--outfmt', '6 qseqid sseqid pident',  # Format 6
+        '--outfmt', '6','qseqid', 'sseqid', 'pident',  # Format 6
         '--threads', str(threads),
         '--evalue', '1e-5',
         '--ignore-warnings'
