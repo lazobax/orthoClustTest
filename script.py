@@ -285,7 +285,7 @@ def main():
     setup_logging(log_file)
 
     # Temporary directory
-    tmp_dir = tempfile.mkdtemp()
+    tmp_dir = tempfile.mkdtemp(prefix='tmp_', dir=output_dir)
     success = False  # Track if the script ran successfully
 
     try:
