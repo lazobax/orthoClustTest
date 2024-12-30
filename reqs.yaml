@@ -7,5 +7,6 @@ dependencies:
   - mmseqs2
   - mcl
   - pip
+  - diamond
   - pip:
       - argparse
