@@ -7,7 +7,7 @@ import subprocess
 import logging
 import tempfile
 import shutil
-from collections import Counter, defaultdict
+from collections import Counter
 import datetime
 from itertools import combinations
 
@@ -39,6 +39,13 @@ def parse_arguments():
         choices=['m', 'd'],
         default='m',
         help='Choose the aligner: mmseqs2 (m) or DIAMOND (d). Default is mmseqs2.'
+    )
+
+    # Debug mode
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='If set, keep temporary files upon error for debugging.'
     )
 
     return parser.parse_args()
@@ -77,7 +84,7 @@ def run_mmseqs2(input_dir, tmp_dir, threads):
         tmp_dir,
         '-a',                  # Include alignment
         '--max-seqs', '1000',
-        '-t', str(threads)     # Number of threads
+        '--threads', str(threads)  # Number of threads
     ]
     subprocess.run(cmd, check=True)
 
@@ -120,14 +127,13 @@ def run_diamond(input_dir, tmp_dir, threads):
     subprocess.run(cmd, check=True)
 
     # Run DIAMOND all-vs-all
-    # Note: We'll use the same file for both query and DB
     m8_result = os.path.join(result_dir, 'result.m8')
     cmd = [
         'diamond', 'blastp',
         '--db', diamond_db,
         '--query', concatenated_fasta,
         '--out', m8_result,
-        '--outfmt', '6 qseqid sseqid pident',  # Format 6, minimal columns
+        '--outfmt', '6 qseqid sseqid pident',  # Format 6
         '--threads', str(threads),
         '--evalue', '1e-5'
     ]
@@ -188,7 +194,6 @@ def parse_fasta_headers(input_dir):
 def get_top_words(cluster_headers, stopwords):
     words = []
     for header in cluster_headers:
-        # skip the '>' and parse annotation
         annotation = ' '.join(header.split()[1:])
         words.extend(annotation.split())
     words = [word for word in words if word.lower() not in stopwords]
@@ -209,7 +214,6 @@ def generate_csv(clusters, headers, input_dir, output_dir, prefix):
                     protein_id = line.strip().split()[0][1:]
                     file_proteins[f].add(protein_id)
 
-    # Prepare output files
     main_csv = os.path.join(output_dir, f'{prefix}_clusters.csv')
     unassigned_csv = os.path.join(output_dir, f'{prefix}_unassigned_orthogroups.csv')
     cluster_names_file = os.path.join(output_dir, f'{prefix}_cluster_names.txt')
@@ -231,9 +235,7 @@ def generate_csv(clusters, headers, input_dir, output_dir, prefix):
 
         for cluster in clusters:
             cluster_proteins = cluster
-
-            # Retrieve the short headers
-            cluster_headers = [headers.get(protein_id, '') for protein_id in cluster_proteins]
+            cluster_headers = [headers.get(pid, '') for pid in cluster_proteins]
 
             # Determine which files the proteins come from
             species_present = set()
@@ -258,23 +260,23 @@ def generate_csv(clusters, headers, input_dir, output_dir, prefix):
             # Build CSV row
             row = [orthogroup_name]
             for f in files:
-                proteins_list = proteins_in_species[f]
-                row.append(';'.join(proteins_list))
+                row.append(';'.join(proteins_in_species[f]))
 
-            # Decide if it is assigned or unassigned
+            # Decide if assigned or unassigned
             if len(species_present) > 1:
                 main_outfile.write(','.join(row) + '\n')
             else:
                 unassigned_outfile.write(','.join(row) + '\n')
 
-            # Write all pairwise combos to the pairs file
+            # Write all pairwise combos
             short_cluster_proteins = [headers.get(pid, pid) for pid in cluster_proteins]
             for p1, p2 in combinations(short_cluster_proteins, 2):
                 pairs_outfile.write(f'{p1}\t{p2}\n')
 
 def main():
     args = parse_arguments()
-    # Create output directory with prefix name
+
+    # Create output directory
     output_dir = args.prefix
     os.makedirs(output_dir, exist_ok=True)
 
@@ -282,12 +284,15 @@ def main():
     log_file = os.path.join(output_dir, f'{args.prefix}_protein_clustering.log')
     setup_logging(log_file)
 
+    # Temporary directory
     tmp_dir = tempfile.mkdtemp()
+    success = False  # Track if the script ran successfully
+
     try:
         # Decide which aligner to use
         if args.aligner == 'm':
             m8_file = run_mmseqs2(args.input_directory, tmp_dir, args.threads)
-        else:  # args.aligner == 'd'
+        else:
             m8_file = run_diamond(args.input_directory, tmp_dir, args.threads)
 
         # Build graph
@@ -304,19 +309,25 @@ def main():
         # Parse headers
         headers = parse_fasta_headers(args.input_directory)
 
-        # Read clusters from MCL output
+        # Read clusters
         with open(mcl_output_file, 'r') as infile:
             clusters = [line.strip().split('\t') for line in infile]
 
-        # Generate CSV files
+        # Generate CSV
         generate_csv(clusters, headers, args.input_directory, output_dir, args.prefix)
 
         logging.info('Script completed successfully.')
         logging.info('Script ended.')
+        success = True
+
     except Exception as e:
         logging.error('An error occurred:', exc_info=True)
+
     finally:
-        shutil.rmtree(tmp_dir)
+        # If the script did NOT fail or if --debug is NOT set, remove temp files
+        # In other words, only keep temp files if there's an error AND --debug is True
+        if success or not args.debug:
+            shutil.rmtree(tmp_dir)
 
 if __name__ == '__main__':
     main()
