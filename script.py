@@ -83,7 +83,6 @@ def run_mmseqs2(input_dir, tmp_dir, threads):
         search_result,
         tmp_dir,
         '-a',                  # Include alignment
-        '--max-seqs', '1000',
         '--threads', str(threads)  # Number of threads
     ]
     subprocess.run(cmd, check=True)
@@ -110,7 +109,7 @@ def run_diamond(input_dir, tmp_dir, threads):
     os.makedirs(result_dir, exist_ok=True)
 
     # Concatenate all FASTA files
-    concatenated_fasta = os.path.join(tmp_dir, 'all_proteins.fasta')
+    concatenated_fasta = os.path.join(tmp_dir, 'all_proteins.faa')
     with open(concatenated_fasta, 'w') as outfile:
         for filename in os.listdir(input_dir):
             if filename.endswith('.fasta') or filename.endswith('.fa'):
@@ -135,7 +134,8 @@ def run_diamond(input_dir, tmp_dir, threads):
         '--out', m8_result,
         '--outfmt', '6 qseqid sseqid pident',  # Format 6
         '--threads', str(threads),
-        '--evalue', '1e-5'
+        '--evalue', '1e-5',
+        '--ignore-warnings'
     ]
     subprocess.run(cmd, check=True)
 
